@@ -18,13 +18,18 @@ requires Streamlit >= 1.43.0 — requirements.txt has been bumped accordingly.
 """
 
 import re
+from datetime import datetime, timezone
+
 import numpy as np
 import streamlit as st
-import fitz  # PyMuPDF
 import faiss
-import requests
 from groq import Groq
 from sentence_transformers import SentenceTransformer
+
+from cve_intel import enrich_cve, enriched_to_text
+from risk_engine import calculate_risk
+from extractors import extract_text
+from report_generator import generate_report_pdf
 
 # ---------------------------------------------------------------------------
 # Page setup
@@ -37,6 +42,7 @@ CHUNK_SIZE = 900
 CHUNK_OVERLAP = 150
 TOP_K = 4
 CVE_PATTERN = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
+SUPPORTED_UPLOAD_TYPES = ["pdf", "docx", "txt", "csv", "xlsx", "json"]
 
 
 @st.cache_resource
@@ -57,6 +63,10 @@ if "sources" not in st.session_state:
     st.session_state.sources = []
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "explain_mode" not in st.session_state:
+    st.session_state.explain_mode = "Technical"
+if "history" not in st.session_state:
+    st.session_state.history = []  # investigation history for sidebar + report export
 
 # ---------------------------------------------------------------------------
 # Frontend styling only — everything below is presentation, not logic
@@ -272,8 +282,38 @@ with st.sidebar:
     )
 
     st.divider()
+    st.markdown('<p class="console-label">🎓 Explanation Mode</p>', unsafe_allow_html=True)
+    st.session_state.explain_mode = st.radio(
+        "Explain answers for:",
+        ["Technical", "Beginner"],
+        index=0 if st.session_state.explain_mode == "Technical" else 1,
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    st.caption(
+        "Technical — analyst-grade detail (attack vector, mitigation, references). "
+        "Beginner — plain-language explanation, no jargon."
+    )
+
+    st.divider()
     st.markdown('<p class="console-label">📎 How to feed it</p>', unsafe_allow_html=True)
-    st.caption("Use the 📎 clip icon in the chat box to attach PDF advisories, or just type a CVE ID (e.g. CVE-2024-3400) and send — Sentry fetches it from NVD automatically.")
+    st.caption(
+        "Attach a report (PDF / DOCX / TXT / CSV / XLSX / JSON) via the 📎 clip icon, "
+        "or just type a CVE ID (e.g. CVE-2024-3400) and send — Sentry enriches it live "
+        "from NVD + CISA KEV automatically."
+    )
+
+    st.divider()
+    st.markdown('<p class="console-label">🕓 Investigation History</p>', unsafe_allow_html=True)
+    if st.session_state.history:
+        for item in reversed(st.session_state.history[-8:]):
+            st.markdown(
+                f'<div class="mission-stat"><span>{item["question"][:28]}</span>'
+                f'<b>{item.get("priority", "—")}</b></div>',
+                unsafe_allow_html=True,
+            )
+    else:
+        st.caption("No investigations yet.")
 
     st.divider()
     if st.button("🗑️ Clear knowledge base"):
@@ -285,11 +325,6 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def extract_pdf_text(file_bytes: bytes) -> str:
-    doc = fitz.open(stream=file_bytes, filetype="pdf")
-    return "\n".join(page.get_text() for page in doc)
-
-
 def chunk_text(text: str, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
     text = re.sub(r"\s+", " ", text).strip()
     chunks = []
@@ -325,27 +360,6 @@ def add_to_index(text: str, source_label: str):
     return len(new_chunks)
 
 
-def fetch_cve_from_nvd(cve_id: str):
-    url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve_id.strip().upper()}"
-    r = requests.get(url, timeout=15)
-    r.raise_for_status()
-    data = r.json()
-    vulns = data.get("vulnerabilities", [])
-    if not vulns:
-        return None
-    cve = vulns[0]["cve"]
-    desc = next((d["value"] for d in cve.get("descriptions", []) if d["lang"] == "en"), "")
-    metrics = cve.get("metrics", {})
-    cvss = "N/A"
-    for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
-        if key in metrics:
-            cvss = metrics[key][0]["cvssData"]["baseScore"]
-            break
-    refs = [r_["url"] for r_ in cve.get("references", [])][:5]
-    text = f"CVE ID: {cve_id.upper()}\nCVSS Base Score: {cvss}\nDescription: {desc}\nReferences: {', '.join(refs)}"
-    return text, cvss
-
-
 def severity_badge(score):
     try:
         score = float(score)
@@ -372,24 +386,73 @@ def severity_chip_html(score):
     return f'<span class="sev-chip {css_class}">{label} · {score}</span>'
 
 
+def risk_badge_html(risk: dict) -> str:
+    """Risk meter + priority badge for the AI Risk Prioritization Engine."""
+    pct = risk["score"]
+    return f"""
+    <div style="margin:8px 0 4px 0;">
+      <span class="sev-chip" style="background:{risk['color']}22;color:{risk['color']};border:1px solid {risk['color']}55;">
+        {risk['priority']} · Risk Score {pct}/100
+      </span>
+      <div style="background:#131B27;border:1px solid #1F2B3B;border-radius:999px;height:8px;margin-top:6px;overflow:hidden;">
+        <div style="width:{pct}%;height:100%;background:{risk['color']};"></div>
+      </div>
+    </div>
+    """
+
+
+def confidence_html(confidence: float) -> str:
+    return (
+        f'<span class="src-chip">Confidence: {confidence:.0f}%'
+        f' · {len(st.session_state.get("_last_results", []))} chunk(s) retrieved</span>'
+    )
+
+
 def retrieve(query: str, k=TOP_K):
+    """Return (chunk, source, similarity_score) tuples. Similarity is cosine
+    similarity in [-1, 1] since vectors are normalized and the index is IP."""
     if st.session_state.index is None or st.session_state.index.ntotal == 0:
         return []
     qvec = embed_query(query)
     scores, idxs = st.session_state.index.search(qvec, min(k, st.session_state.index.ntotal))
     results = []
-    for i in idxs[0]:
+    for score, i in zip(scores[0], idxs[0]):
         if i == -1:
             continue
-        results.append((st.session_state.chunks[i], st.session_state.sources[i]))
+        results.append((st.session_state.chunks[i], st.session_state.sources[i], float(score)))
     return results
 
 
-def answer_question(client: Groq, query: str, context_pairs):
-    context = "\n\n---\n\n".join(f"[Source: {src}]\n{chunk}" for chunk, src in context_pairs)
+def compute_confidence(results) -> float:
+    """Heuristic confidence score (0-100) from retrieval similarity. No
+    retrieved context, or weak similarity, means low confidence — the
+    assistant is instructed to say so rather than fabricate an answer."""
+    if not results:
+        return 0.0
+    top_scores = [r[2] for r in results]
+    avg_top = sum(top_scores[:3]) / min(3, len(top_scores))
+    return round(max(0.0, min(1.0, avg_top)) * 100, 1)
+
+
+def answer_question(client: Groq, query: str, context_pairs, mode: str = "Technical"):
+    context = "\n\n---\n\n".join(f"[Source: {src}]\n{chunk}" for chunk, src, _ in context_pairs)
+
+    if mode == "Beginner":
+        style_instructions = """Explain like a teacher talking to someone with no security background.
+Avoid jargon (e.g. instead of "Remote Code Execution vulnerability", say something like
+"a hacker could take control of the computer remotely if it isn't updated"). Keep it short,
+plain-language, and reassuring but accurate."""
+    else:
+        style_instructions = """Explain for a cybersecurity professional. Include, where the context
+supports it: technical description, attack vector, affected software/versions, mitigation
+steps, and references."""
+
     prompt = f"""You are a cyber security analyst assistant. Answer the question ONLY using the
-context below. If the context doesn't contain the answer, say so clearly rather than guessing.
+context below. If the context doesn't contain enough evidence, say clearly:
+"I could not find sufficient evidence." — never fabricate facts, CVEs, or scores.
 Cite the source label for each claim you make.
+
+{style_instructions}
 
 Context:
 {context}
@@ -429,11 +492,11 @@ for msg in st.session_state.messages:
         st.markdown(msg["content"])
 
 # Single ChatGPT/Claude/Gemini-style input: type a question, paste a CVE ID,
-# and/or attach PDF advisories with the built-in 📎 clip icon — all from one box.
+# and/or attach a report (PDF/DOCX/TXT/CSV/XLSX/JSON) with the 📎 clip icon.
 prompt = st.chat_input(
-    "Ask a question, paste a CVE ID (e.g. CVE-2024-3400), or attach a PDF...",
+    "Ask a question, paste a CVE ID (e.g. CVE-2024-3400), or attach a report...",
     accept_file="multiple",
-    file_type=["pdf"],
+    file_type=SUPPORTED_UPLOAD_TYPES,
 )
 
 if prompt:
@@ -444,32 +507,42 @@ if prompt:
         st.error("Please enter a Groq API key in the sidebar first.")
     else:
         ingestion_notes = []
+        last_cve_data = None  # most recent enriched CVE (for risk meter + report)
+        last_risk = None
 
-        # 1) Ingest any PDFs attached via the chat's clip icon
+        # 1) Ingest any reports attached via the clip icon (multi-format)
         for f in attached_files:
             already_added = f.name in st.session_state.sources
             if not already_added:
                 with st.spinner(f"Processing {f.name}..."):
-                    text = extract_pdf_text(f.read())
-                    n = add_to_index(text, f.name)
-                ingestion_notes.append(f'📎 Added **{n}** chunks from `{f.name}`')
+                    try:
+                        text = extract_text(f.name, f.read())
+                        n = add_to_index(text, f.name)
+                        ingestion_notes.append(f'📎 Added **{n}** chunks from `{f.name}`')
+                    except Exception as e:
+                        ingestion_notes.append(f"⚠️ Could not process `{f.name}`: {e}")
 
-        # 2) Auto-detect and fetch any CVE IDs typed directly in the message
+        # 2) Auto-detect and enrich any CVE IDs typed directly in the message
+        #    (live NVD details + CISA KEV active-exploitation + custom risk score)
         found_cves = sorted(set(m.upper() for m in CVE_PATTERN.findall(query_text)))
         for cve in found_cves:
             if cve in st.session_state.sources:
                 continue
-            with st.spinner(f"Fetching {cve} from NVD..."):
+            with st.spinner(f"Fetching {cve} from NVD + CISA KEV..."):
                 try:
-                    result = fetch_cve_from_nvd(cve)
+                    enriched = enrich_cve(cve)
                 except Exception as e:
-                    result = None
-                    ingestion_notes.append(f"⚠️ NVD lookup failed for `{cve}`: {e}")
-            if result:
-                text, cvss = result
-                n = add_to_index(text, cve)
-                ingestion_notes.append(f'📡 Added **{cve}** — {severity_chip_html(cvss)} · {n} chunk(s)')
-            elif result is None:
+                    enriched = None
+                    ingestion_notes.append(f"⚠️ Live lookup failed for `{cve}`: {e}")
+            if enriched:
+                risk = calculate_risk(enriched)
+                n = add_to_index(enriched_to_text(enriched), cve)
+                ingestion_notes.append(
+                    f'📡 Added **{cve}** — {severity_chip_html(enriched.get("cvss_score"))} · '
+                    f'{n} chunk(s)' + risk_badge_html(risk)
+                )
+                last_cve_data, last_risk = enriched, risk
+            else:
                 ingestion_notes.append(f"⚠️ No NVD data found for `{cve}`")
 
         # Render the user's turn (attachments shown as chips + their typed text)
@@ -487,6 +560,8 @@ if prompt:
                 st.markdown(note, unsafe_allow_html=True)
 
             answer = None
+            confidence = 0.0
+            results = []
             if query_text:
                 if not st.session_state.chunks:
                     st.error("Add at least one document or CVE before asking a question.")
@@ -501,14 +576,50 @@ if prompt:
                     )
                     with st.spinner("Drafting a grounded answer..."):
                         results = retrieve(query_text)
-                        answer = answer_question(client, query_text, results)
+                        st.session_state["_last_results"] = results
+                        confidence = compute_confidence(results)
+                        answer = answer_question(client, query_text, results, mode=st.session_state.explain_mode)
+
+                        if confidence < 40:
+                            st.warning("⚠️ Low confidence — evidence in the knowledge base is thin.")
                         st.markdown(answer)
-                        with st.expander("📎 Sources used"):
-                            for chunk, src in results:
-                                st.markdown(f'<span class="src-chip">{src}</span>', unsafe_allow_html=True)
+                        st.markdown(confidence_html(confidence), unsafe_allow_html=True)
+
+                        with st.expander("📎 Sources & retrieved context used"):
+                            for chunk, src, score in results:
+                                st.markdown(
+                                    f'<span class="src-chip">{src} · similarity {score:.2f}</span>',
+                                    unsafe_allow_html=True,
+                                )
                                 st.caption(chunk[:300] + ("..." if len(chunk) > 300 else ""))
+
+                    # FEATURE 6 — Investigation report export
+                    report_sources = sorted(set(src for _, src, _ in results))
+                    pdf_bytes = generate_report_pdf(
+                        question=query_text,
+                        answer=answer,
+                        cve_data=last_cve_data,
+                        risk=last_risk,
+                        confidence=confidence,
+                        sources=report_sources,
+                    )
+                    st.download_button(
+                        "⬇️ Download Investigation Report",
+                        data=pdf_bytes,
+                        file_name=f"sentry-investigation-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.pdf",
+                        mime="application/pdf",
+                    )
+
+                    st.session_state.history.append(
+                        {
+                            "question": query_text,
+                            "priority": last_risk["priority"] if last_risk else "—",
+                            "confidence": confidence,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
             elif not ingestion_notes:
-                st.markdown("Attach a PDF or type a CVE ID to get started.")
+                st.markdown("Attach a report or type a CVE ID to get started.")
 
         assistant_content = "\n\n".join(ingestion_notes) if ingestion_notes else ""
         if answer:
