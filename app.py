@@ -26,9 +26,158 @@ from sentence_transformers import SentenceTransformer
 # ---------------------------------------------------------------------------
 # Page setup
 # ---------------------------------------------------------------------------
-st.set_page_config(page_title="Cyber Security RAG Assistant", page_icon="🛡️", layout="wide")
-st.title("🛡️ Cyber Security Threat Intelligence RAG Assistant")
-st.caption("Upload security advisories / CVE reports or pull a live CVE, then ask questions grounded in that data.")
+st.set_page_config(page_title="SENTRY // Threat Intel Console", page_icon="🛡️", layout="wide")
+
+# ---------------------------------------------------------------------------
+# Frontend styling only — no backend/session/logic changes below this block
+# ---------------------------------------------------------------------------
+st.markdown(
+    """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap');
+
+:root{
+  --bg:#0A0E14;
+  --panel:#111826;
+  --panel-2:#161F2E;
+  --border:#232E40;
+  --text:#DCE6F0;
+  --muted:#7C8B9E;
+  --accent:#00E5C7;
+  --accent-dim:#0A8F80;
+  --danger:#FF4D5E;
+  --warn:#FFB627;
+  --low:#4ADE80;
+}
+
+/* ---------- base canvas ---------- */
+[data-testid="stAppViewContainer"]{
+  background:
+    linear-gradient(180deg, rgba(0,229,199,0.04), transparent 280px),
+    repeating-linear-gradient(0deg, rgba(255,255,255,0.012) 0px, rgba(255,255,255,0.012) 1px, transparent 1px, transparent 3px),
+    var(--bg);
+}
+[data-testid="stHeader"]{ background: transparent; }
+html, body, [class*="css"]{ font-family:'Inter', sans-serif; color: var(--text); }
+h1,h2,h3,h4,h5, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3{
+  font-family:'JetBrains Mono', monospace; letter-spacing:0.02em;
+}
+
+/* ---------- signature hero: threat scanner ---------- */
+.sentry-hero{
+  position:relative; overflow:hidden;
+  border:1px solid var(--border); border-radius:14px;
+  background: radial-gradient(120% 160% at 15% 0%, #101827 0%, #0B111B 60%, #0A0E14 100%);
+  padding:28px 32px; margin-bottom:22px;
+}
+.sentry-hero::before{
+  content:""; position:absolute; inset:-50%;
+  background: conic-gradient(from 0deg, transparent 0deg, rgba(0,229,199,0.20) 18deg, transparent 40deg, transparent 360deg);
+  animation: sweep 4.5s linear infinite;
+}
+@media (prefers-reduced-motion: reduce){ .sentry-hero::before{ animation:none; } }
+@keyframes sweep{ to{ transform:rotate(360deg); } }
+.sentry-hero-inner{ position:relative; z-index:1; display:flex; align-items:center; justify-content:space-between; gap:24px; flex-wrap:wrap; }
+.sentry-brand{ display:flex; align-items:center; gap:16px; }
+.sentry-badge{
+  width:52px; height:52px; border-radius:12px; display:flex; align-items:center; justify-content:center;
+  background:linear-gradient(145deg, var(--panel-2), var(--panel)); border:1px solid var(--border);
+  font-size:26px; box-shadow: 0 0 0 1px rgba(0,229,199,0.08), 0 0 24px rgba(0,229,199,0.15);
+}
+.sentry-title{ font-family:'JetBrains Mono', monospace; font-size:1.55rem; font-weight:700; margin:0; color:#EEF5FA; }
+.sentry-sub{ font-size:0.92rem; color:var(--muted); margin-top:4px; max-width:520px; }
+.sentry-status{ display:flex; align-items:center; gap:10px; font-family:'JetBrains Mono', monospace; font-size:0.78rem; color:var(--accent); letter-spacing:0.08em; }
+.sentry-dot{ width:9px; height:9px; border-radius:50%; background:var(--accent); box-shadow:0 0 10px var(--accent); animation:pulse 1.8s ease-in-out infinite; }
+@keyframes pulse{ 0%,100%{opacity:1; transform:scale(1);} 50%{opacity:0.4; transform:scale(0.8);} }
+
+/* ---------- sidebar console ---------- */
+[data-testid="stSidebar"]{
+  background: var(--panel); border-right:1px solid var(--border);
+}
+[data-testid="stSidebar"] .stMarkdown h1, [data-testid="stSidebar"] .stMarkdown h2, [data-testid="stSidebar"] .stMarkdown h3{
+  font-size:0.82rem; text-transform:uppercase; letter-spacing:0.12em; color:var(--accent) !important;
+}
+.console-label{
+  font-family:'JetBrains Mono', monospace; font-size:0.75rem; letter-spacing:0.14em;
+  color:var(--accent); text-transform:uppercase; margin:2px 0 10px 0; opacity:0.9;
+}
+
+/* inputs & buttons */
+.stTextInput input, .stFileUploader, textarea{
+  background: var(--panel-2) !important; color:var(--text) !important;
+  border:1px solid var(--border) !important; border-radius:8px !important;
+}
+.stButton button, .stFormSubmitButton button{
+  background: linear-gradient(145deg, var(--accent-dim), var(--accent)) !important;
+  color:#04120F !important; font-weight:700 !important; border:none !important; border-radius:8px !important;
+  font-family:'JetBrains Mono', monospace !important; letter-spacing:0.04em;
+  transition:transform .15s ease, box-shadow .15s ease;
+}
+.stButton button:hover{ transform:translateY(-1px); box-shadow:0 6px 18px rgba(0,229,199,0.25); }
+
+/* alerts */
+[data-testid="stAlertContentSuccess"], .stSuccess{ border-radius:8px !important; }
+div[data-baseweb="notification"]{ border-radius:8px !important; }
+
+/* ---------- chat ---------- */
+[data-testid="stChatMessage"]{
+  background: var(--panel) !important; border:1px solid var(--border) !important;
+  border-radius:12px !important; padding:4px 6px !important;
+}
+[data-testid="stChatInput"] textarea{
+  background: var(--panel-2) !important; border:1px solid var(--border) !important; color:var(--text) !important;
+}
+
+/* ---------- knowledge base pill ---------- */
+.kb-pill{
+  display:inline-flex; align-items:center; gap:8px;
+  background: var(--panel-2); border:1px solid var(--border); border-radius:999px;
+  padding:6px 14px; font-family:'JetBrains Mono', monospace; font-size:0.78rem; color:var(--accent);
+}
+.kb-pill.empty{ color:var(--muted); }
+
+/* ---------- severity chips ---------- */
+.sev-chip{ display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:999px;
+  font-family:'JetBrains Mono', monospace; font-size:0.72rem; font-weight:700; letter-spacing:0.04em; }
+.sev-critical{ background:rgba(255,77,94,0.12); color:var(--danger); border:1px solid rgba(255,77,94,0.35); }
+.sev-high{ background:rgba(255,182,39,0.12); color:var(--warn); border:1px solid rgba(255,182,39,0.35); }
+.sev-medium{ background:rgba(255,182,39,0.10); color:var(--warn); border:1px solid rgba(255,182,39,0.25); }
+.sev-low{ background:rgba(74,222,128,0.12); color:var(--low); border:1px solid rgba(74,222,128,0.35); }
+.sev-unknown{ background:rgba(124,139,158,0.12); color:var(--muted); border:1px solid rgba(124,139,158,0.35); }
+
+/* ---------- source chip in expander ---------- */
+.src-chip{
+  display:inline-block; font-family:'JetBrains Mono', monospace; font-size:0.72rem;
+  color:var(--accent); background:rgba(0,229,199,0.08); border:1px solid rgba(0,229,199,0.25);
+  padding:2px 8px; border-radius:6px; margin-bottom:4px;
+}
+
+/* scrollbar */
+::-webkit-scrollbar{ width:10px; height:10px; }
+::-webkit-scrollbar-track{ background:var(--bg); }
+::-webkit-scrollbar-thumb{ background:var(--border); border-radius:6px; }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    """
+<div class="sentry-hero">
+  <div class="sentry-hero-inner">
+    <div class="sentry-brand">
+      <div class="sentry-badge">🛡️</div>
+      <div>
+        <p class="sentry-title">SENTRY // Threat Intel Console</p>
+        <p class="sentry-sub">Ground your questions in real advisories and CVE data — upload a report or pull a live CVE, then interrogate it.</p>
+      </div>
+    </div>
+    <div class="sentry-status"><span class="sentry-dot"></span> MONITORING</div>
+  </div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
 
 CHAT_MODEL = "openai/gpt-oss-120b"  # fast, current Groq model (llama-3.3-70b-versatile is deprecated)
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
@@ -49,7 +198,7 @@ embedder = load_embedder()
 # ---------------------------------------------------------------------------
 api_key = st.secrets.get("GROQ_API_KEY", None) if hasattr(st, "secrets") else None
 with st.sidebar:
-    st.header("⚙️ Setup")
+    st.markdown('<p class="console-label">🔑 Access</p>', unsafe_allow_html=True)
     if not api_key:
         api_key = st.text_input("Groq API key", type="password", help="Get a free key at console.groq.com/keys")
     client = None
@@ -60,7 +209,7 @@ with st.sidebar:
         st.warning("Enter a Groq API key to enable the assistant.")
 
     st.divider()
-    st.header("📥 Add knowledge")
+    st.markdown('<p class="console-label">📥 Ingest Intel</p>', unsafe_allow_html=True)
 
     uploaded_files = st.file_uploader(
         "Upload security advisories / reports (PDF)", type=["pdf"], accept_multiple_files=True
@@ -68,7 +217,7 @@ with st.sidebar:
 
     st.markdown("**Or fetch a live CVE from NVD**")
     cve_id = st.text_input("CVE ID (e.g. CVE-2024-3400)")
-    fetch_cve = st.button("Fetch CVE")
+    fetch_cve = st.button("📡 Fetch CVE")
 
     st.divider()
     if st.button("🗑️ Clear knowledge base"):
@@ -167,6 +316,18 @@ def severity_badge(score):
     return "🟢 Low"
 
 
+def severity_chip_html(score):
+    """Presentational-only HTML chip mirroring severity_badge's thresholds. Display use, no logic change."""
+    label = severity_badge(score)
+    css_class = {
+        "🔴 Critical": "sev-critical",
+        "🟠 High": "sev-high",
+        "🟡 Medium": "sev-medium",
+        "🟢 Low": "sev-low",
+    }.get(label, "sev-unknown")
+    return f'<span class="sev-chip {css_class}">{label} · {score}</span>'
+
+
 def retrieve(query: str, k=TOP_K):
     if st.session_state.index is None or st.session_state.index.ntotal == 0:
         return []
@@ -225,22 +386,32 @@ if fetch_cve:
         if result:
             text, cvss = result
             n = add_to_index(text, cve_id.upper())
-            st.sidebar.success(f"Added {cve_id.upper()} — Severity: {severity_badge(cvss)} ({cvss})")
+            st.sidebar.success(f"Added {cve_id.upper()} — {n} chunk(s) indexed")
+            st.sidebar.markdown(severity_chip_html(cvss), unsafe_allow_html=True)
         elif result is None and cve_id.strip():
             st.sidebar.warning("No data found for that CVE ID.")
 
 # ---------------------------------------------------------------------------
 # Main chat interface
 # ---------------------------------------------------------------------------
-st.subheader("💬 Ask a question")
+st.markdown('<p class="console-label" style="margin-top:4px;">💬 Interrogate the intel</p>', unsafe_allow_html=True)
 
 if st.session_state.chunks:
-    st.info(f"Knowledge base: {len(st.session_state.chunks)} chunks from {len(set(st.session_state.sources))} source(s).")
+    st.markdown(
+        f'<span class="kb-pill">🟢 ONLINE — {len(st.session_state.chunks)} chunks '
+        f'· {len(set(st.session_state.sources))} source(s)</span>',
+        unsafe_allow_html=True,
+    )
 else:
-    st.info("Knowledge base is empty — upload a PDF or fetch a CVE from the sidebar to get started.")
+    st.markdown(
+        '<span class="kb-pill empty">⚪ EMPTY — add a PDF or fetch a CVE from the console to arm the assistant</span>',
+        unsafe_allow_html=True,
+    )
+
+AVATARS = {"user": "🧑\u200d💻", "assistant": "🛡️"}
 
 for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
+    with st.chat_message(msg["role"], avatar=AVATARS.get(msg["role"])):
         st.markdown(msg["content"])
 
 query = st.chat_input("e.g. Is CVE-2024-3400 being actively exploited, and what's the mitigation?")
@@ -252,18 +423,17 @@ if query:
         st.error("Add at least one document or CVE before asking a question.")
     else:
         st.session_state.messages.append({"role": "user", "content": query})
-        with st.chat_message("user"):
+        with st.chat_message("user", avatar=AVATARS["user"]):
             st.markdown(query)
 
-        with st.chat_message("assistant"):
-            with st.spinner("Retrieving context and generating answer..."):
+        with st.chat_message("assistant", avatar=AVATARS["assistant"]):
+            with st.spinner("🔎 Scanning knowledge base and drafting answer..."):
                 results = retrieve(query)
                 answer = answer_question(client, query, results)
                 st.markdown(answer)
                 with st.expander("📎 Sources used"):
                     for chunk, src in results:
-                        st.markdown(f"**{src}**")
+                        st.markdown(f'<span class="src-chip">{src}</span>', unsafe_allow_html=True)
                         st.caption(chunk[:300] + ("..." if len(chunk) > 300 else ""))
 
         st.session_state.messages.append({"role": "assistant", "content": answer})
-
