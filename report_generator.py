@@ -16,6 +16,38 @@ SEVERITY_COLORS = {
     "Low": (74, 222, 128),
 }
 
+# fpdf2's built-in core fonts (Helvetica, etc.) only support Latin-1.
+# LLM answers and risk-engine text can contain checkmarks, smart quotes,
+# em dashes, arrows, etc. — transliterate the common ones and fall back to
+# stripping anything else so report generation never crashes on Unicode.
+_UNICODE_REPLACEMENTS = {
+    "\u2713": "[OK]",   # ✓
+    "\u2714": "[OK]",   # ✔
+    "\u2717": "[X]",    # ✗
+    "\u2014": "-",      # em dash
+    "\u2013": "-",      # en dash
+    "\u2018": "'", "\u2019": "'",
+    "\u201c": '"', "\u201d": '"',
+    "\u2026": "...",    # ellipsis
+    "\u2192": "->",     # arrow
+    "\u2190": "<-",
+    "\u00a0": " ",      # non-breaking space
+    "\u2022": "-",      # bullet
+    "\U0001F534": "[Critical]", "\U0001F7E0": "[High]",
+    "\U0001F7E1": "[Medium]", "\U0001F7E2": "[Low]", "\u26aa": "[Unknown]",
+}
+
+
+def sanitize(text) -> str:
+    """Make arbitrary text safe for fpdf2's core (Latin-1-only) fonts."""
+    if text is None:
+        return ""
+    text = str(text)
+    for src, repl in _UNICODE_REPLACEMENTS.items():
+        text = text.replace(src, repl)
+    # Final safety net: drop any remaining character the core font can't render.
+    return text.encode("latin-1", "replace").decode("latin-1")
+
 
 class InvestigationReport(FPDF):
     def header(self):
@@ -32,19 +64,19 @@ class InvestigationReport(FPDF):
         self.set_y(-15)
         self.set_font("Helvetica", "I", 8)
         self.set_text_color(120, 120, 120)
-        self.cell(0, 10, f"SENTRY Threat Intel Console -- Page {self.page_no()}", align="C")
+        self.cell(0, 10, sanitize(f"SENTRY Threat Intel Console -- Page {self.page_no()}"), align="C")
 
     def section_title(self, text: str):
         self.set_font("Helvetica", "B", 12)
         self.set_text_color(20, 20, 20)
         self.set_fill_color(230, 240, 240)
-        self.cell(0, 8, text, ln=True, fill=True)
+        self.cell(0, 8, sanitize(text), ln=True, fill=True)
         self.ln(2)
 
     def body_text(self, text: str):
         self.set_font("Helvetica", "", 10)
         self.set_text_color(30, 30, 30)
-        self.multi_cell(0, 5.5, text)
+        self.multi_cell(0, 5.5, sanitize(text))
         self.ln(2)
 
 
@@ -85,7 +117,7 @@ def generate_report_pdf(
         color = SEVERITY_COLORS.get(risk["priority"], (150, 150, 150))
         pdf.set_font("Helvetica", "B", 11)
         pdf.set_text_color(*color)
-        pdf.cell(0, 8, f"Risk Score: {risk['score']}/100   Priority: {risk['priority']}", ln=True)
+        pdf.cell(0, 8, sanitize(f"Risk Score: {risk['score']}/100   Priority: {risk['priority']}"), ln=True)
         pdf.set_text_color(30, 30, 30)
         pdf.body_text("Reasoning:\n" + "\n".join(f"- {r}" for r in risk["reasons"]))
 
