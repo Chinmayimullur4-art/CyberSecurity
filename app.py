@@ -12,6 +12,9 @@ Deploy on Streamlit Community Cloud (share.streamlit.io):
 Note: Groq serves inference only, no embeddings API, so this app embeds
 locally with sentence-transformers (all-MiniLM-L6-v2) and uses Groq only
 for the final answer generation.
+
+Note on requirements: st.chat_input's built-in file attachment (accept_file)
+requires Streamlit >= 1.43.0 — requirements.txt has been bumped accordingly.
 """
 
 import re
@@ -33,6 +36,7 @@ EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
 CHUNK_SIZE = 900
 CHUNK_OVERLAP = 150
 TOP_K = 4
+CVE_PATTERN = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
 
 
 @st.cache_resource
@@ -147,14 +151,6 @@ h1,h2,h3,h4,h5{ font-family:'Space Grotesk', sans-serif; }
 .mission-stat{ display:flex; justify-content:space-between; font-family:'JetBrains Mono', monospace; font-size:0.78rem; color:var(--muted); padding:5px 0; border-bottom:1px dashed var(--border); }
 .mission-stat b{ color:var(--text); }
 
-/* ---------- intake cards ---------- */
-[data-testid="stVerticalBlockBorderWrapper"]{
-  background: var(--panel) !important; border:1px solid var(--border) !important; border-radius:14px !important;
-}
-.card-icon{ font-size:1.4rem; }
-.card-title{ font-family:'Space Grotesk', sans-serif; font-weight:600; font-size:1.02rem; margin:6px 0 2px 0; }
-.card-desc{ font-size:0.84rem; color:var(--muted); margin-bottom:10px; }
-
 /* inputs & buttons */
 .stTextInput input, textarea{
   background: var(--panel-2) !important; color:var(--text) !important;
@@ -176,6 +172,12 @@ h1,h2,h3,h4,h5{ font-family:'Space Grotesk', sans-serif; }
 [data-testid="stChatInput"] textarea{
   background: var(--panel-2) !important; border:1px solid var(--border) !important; color:var(--text) !important;
 }
+[data-testid="stChatInput"]{
+  border:1px solid var(--border) !important; border-radius:16px !important; background: var(--panel) !important;
+}
+[data-testid="stChatInput"] button{
+  color: var(--accent) !important;
+}
 
 /* ---------- knowledge base pill ---------- */
 .kb-pill{
@@ -194,11 +196,16 @@ h1,h2,h3,h4,h5{ font-family:'Space Grotesk', sans-serif; }
 .sev-low{ background:rgba(74,222,128,0.12); color:var(--low); border:1px solid rgba(74,222,128,0.35); }
 .sev-unknown{ background:rgba(124,139,158,0.12); color:var(--muted); border:1px solid rgba(124,139,158,0.35); }
 
-/* ---------- source chip ---------- */
+/* ---------- source / attachment chip ---------- */
 .src-chip{
   display:inline-block; font-family:'JetBrains Mono', monospace; font-size:0.72rem;
   color:var(--accent); background:rgba(47,230,199,0.08); border:1px solid rgba(47,230,199,0.25);
   padding:2px 8px; border-radius:6px; margin-bottom:4px;
+}
+.attach-chip{
+  display:inline-flex; align-items:center; gap:6px; font-family:'JetBrains Mono', monospace; font-size:0.74rem;
+  color:var(--accent2); background:rgba(123,97,255,0.10); border:1px solid rgba(123,97,255,0.3);
+  padding:3px 10px; border-radius:999px; margin:2px 6px 2px 0;
 }
 
 /* scrollbar */
@@ -227,7 +234,7 @@ def render_sentinel(state="standby"):
         </div>
         <div>
           <p class="sentry-title">SENTRY</p>
-          <p class="sentry-sub">Your AI threat-intel analyst. Feed it advisories or live CVEs, then interrogate the data — every answer is grounded and cited.</p>
+          <p class="sentry-sub">Your AI threat-intel analyst. Type a question, paste a CVE ID, or attach a PDF advisory — right in the chat below.</p>
         </div>
       </div>
       <div class="{status_cls}"><span class="sentry-dot"></span> {status_label}</div>
@@ -265,37 +272,15 @@ with st.sidebar:
     )
 
     st.divider()
+    st.markdown('<p class="console-label">📎 How to feed it</p>', unsafe_allow_html=True)
+    st.caption("Use the 📎 clip icon in the chat box to attach PDF advisories, or just type a CVE ID (e.g. CVE-2024-3400) and send — Sentry fetches it from NVD automatically.")
+
+    st.divider()
     if st.button("🗑️ Clear knowledge base"):
         st.session_state.pop("index", None)
         st.session_state.pop("chunks", None)
         st.session_state.pop("sources", None)
         st.success("Cleared.")
-
-# ---------------------------------------------------------------------------
-# Intake Bay — file upload + CVE fetch, now in the main chat area
-# ---------------------------------------------------------------------------
-st.markdown('<p class="console-label">📥 Intake Bay — feed the Sentinel</p>', unsafe_allow_html=True)
-intake_col1, intake_col2 = st.columns(2)
-
-with intake_col1:
-    with st.container(border=True):
-        st.markdown('<span class="card-icon">📄</span>', unsafe_allow_html=True)
-        st.markdown('<p class="card-title">Upload advisories</p>', unsafe_allow_html=True)
-        st.markdown('<p class="card-desc">Drop in PDF security advisories or vulnerability reports.</p>', unsafe_allow_html=True)
-        uploaded_files = st.file_uploader(
-            "Upload security advisories / reports (PDF)",
-            type=["pdf"],
-            accept_multiple_files=True,
-            label_visibility="collapsed",
-        )
-
-with intake_col2:
-    with st.container(border=True):
-        st.markdown('<span class="card-icon">📡</span>', unsafe_allow_html=True)
-        st.markdown('<p class="card-title">Fetch a live CVE</p>', unsafe_allow_html=True)
-        st.markdown('<p class="card-desc">Pull a record straight from NVD by ID.</p>', unsafe_allow_html=True)
-        cve_id = st.text_input("CVE ID (e.g. CVE-2024-3400)", label_visibility="collapsed", placeholder="CVE-2024-3400")
-        fetch_cve = st.button("📡 Fetch CVE")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -421,36 +406,6 @@ Answer:"""
 
 
 # ---------------------------------------------------------------------------
-# Ingest uploads
-# ---------------------------------------------------------------------------
-if uploaded_files:
-    for f in uploaded_files:
-        already_added = f.name in st.session_state.sources
-        if not already_added:
-            with st.spinner(f"Processing {f.name}..."):
-                text = extract_pdf_text(f.read())
-                n = add_to_index(text, f.name)
-            st.success(f"Added {n} chunks from {f.name}")
-
-if fetch_cve:
-    if not cve_id.strip():
-        st.error("Enter a CVE ID first.")
-    else:
-        with st.spinner(f"Fetching {cve_id} from NVD..."):
-            try:
-                result = fetch_cve_from_nvd(cve_id)
-            except Exception as e:
-                result = None
-                st.error(f"NVD lookup failed: {e}")
-        if result:
-            text, cvss = result
-            n = add_to_index(text, cve_id.upper())
-            st.success(f"Added {cve_id.upper()} — {n} chunk(s) indexed")
-            st.markdown(severity_chip_html(cvss), unsafe_allow_html=True)
-        elif result is None and cve_id.strip():
-            st.warning("No data found for that CVE ID.")
-
-# ---------------------------------------------------------------------------
 # Main chat interface
 # ---------------------------------------------------------------------------
 st.markdown('<p class="console-label">💬 Interrogate the intel</p>', unsafe_allow_html=True)
@@ -463,7 +418,7 @@ if st.session_state.chunks:
     )
 else:
     st.markdown(
-        '<span class="kb-pill empty">⚪ EMPTY — upload a PDF or fetch a CVE above to arm the Sentinel</span>',
+        '<span class="kb-pill empty">⚪ EMPTY — attach a PDF (📎) or type a CVE ID below to arm the Sentinel</span>',
         unsafe_allow_html=True,
     )
 
@@ -473,34 +428,90 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"], avatar=AVATARS.get(msg["role"])):
         st.markdown(msg["content"])
 
-query = st.chat_input("e.g. Is CVE-2024-3400 being actively exploited, and what's the mitigation?")
+# Single ChatGPT/Claude/Gemini-style input: type a question, paste a CVE ID,
+# and/or attach PDF advisories with the built-in 📎 clip icon — all from one box.
+prompt = st.chat_input(
+    "Ask a question, paste a CVE ID (e.g. CVE-2024-3400), or attach a PDF...",
+    accept_file="multiple",
+    file_type=["pdf"],
+)
 
-if query:
+if prompt:
+    query_text = (prompt.text or "").strip()
+    attached_files = prompt.files or []
+
     if not client:
         st.error("Please enter a Groq API key in the sidebar first.")
-    elif not st.session_state.chunks:
-        st.error("Add at least one document or CVE before asking a question.")
     else:
-        st.session_state.messages.append({"role": "user", "content": query})
+        ingestion_notes = []
+
+        # 1) Ingest any PDFs attached via the chat's clip icon
+        for f in attached_files:
+            already_added = f.name in st.session_state.sources
+            if not already_added:
+                with st.spinner(f"Processing {f.name}..."):
+                    text = extract_pdf_text(f.read())
+                    n = add_to_index(text, f.name)
+                ingestion_notes.append(f'📎 Added **{n}** chunks from `{f.name}`')
+
+        # 2) Auto-detect and fetch any CVE IDs typed directly in the message
+        found_cves = sorted(set(m.upper() for m in CVE_PATTERN.findall(query_text)))
+        for cve in found_cves:
+            if cve in st.session_state.sources:
+                continue
+            with st.spinner(f"Fetching {cve} from NVD..."):
+                try:
+                    result = fetch_cve_from_nvd(cve)
+                except Exception as e:
+                    result = None
+                    ingestion_notes.append(f"⚠️ NVD lookup failed for `{cve}`: {e}")
+            if result:
+                text, cvss = result
+                n = add_to_index(text, cve)
+                ingestion_notes.append(f'📡 Added **{cve}** — {severity_chip_html(cvss)} · {n} chunk(s)')
+            elif result is None:
+                ingestion_notes.append(f"⚠️ No NVD data found for `{cve}`")
+
+        # Render the user's turn (attachments shown as chips + their typed text)
+        st.session_state.messages.append({"role": "user", "content": query_text or "*(attachment only)*"})
         with st.chat_message("user", avatar=AVATARS["user"]):
-            st.markdown(query)
+            if attached_files:
+                chips = "".join(f'<span class="attach-chip">📎 {f.name}</span>' for f in attached_files)
+                st.markdown(chips, unsafe_allow_html=True)
+            if query_text:
+                st.markdown(query_text)
 
+        # Assistant turn: show ingestion results, then answer if a question was asked
         with st.chat_message("assistant", avatar=AVATARS["assistant"]):
-            st.markdown(
-                '<div class="thinking-strip">'
-                '<div class="sentinel-wrap" style="width:26px;height:26px;">'
-                '<div class="sentinel-ring fast" style="border-width:1px;"></div>'
-                '<div class="sentinel-core think" style="inset:5px;"></div>'
-                '</div> Sentinel is scanning the knowledge base…</div>',
-                unsafe_allow_html=True,
-            )
-            with st.spinner("Drafting a grounded answer..."):
-                results = retrieve(query)
-                answer = answer_question(client, query, results)
-                st.markdown(answer)
-                with st.expander("📎 Sources used"):
-                    for chunk, src in results:
-                        st.markdown(f'<span class="src-chip">{src}</span>', unsafe_allow_html=True)
-                        st.caption(chunk[:300] + ("..." if len(chunk) > 300 else ""))
+            for note in ingestion_notes:
+                st.markdown(note, unsafe_allow_html=True)
 
-        st.session_state.messages.append({"role": "assistant", "content": answer})
+            answer = None
+            if query_text:
+                if not st.session_state.chunks:
+                    st.error("Add at least one document or CVE before asking a question.")
+                else:
+                    st.markdown(
+                        '<div class="thinking-strip">'
+                        '<div class="sentinel-wrap" style="width:26px;height:26px;">'
+                        '<div class="sentinel-ring fast" style="border-width:1px;"></div>'
+                        '<div class="sentinel-core think" style="inset:5px;"></div>'
+                        '</div> Sentinel is scanning the knowledge base…</div>',
+                        unsafe_allow_html=True,
+                    )
+                    with st.spinner("Drafting a grounded answer..."):
+                        results = retrieve(query_text)
+                        answer = answer_question(client, query_text, results)
+                        st.markdown(answer)
+                        with st.expander("📎 Sources used"):
+                            for chunk, src in results:
+                                st.markdown(f'<span class="src-chip">{src}</span>', unsafe_allow_html=True)
+                                st.caption(chunk[:300] + ("..." if len(chunk) > 300 else ""))
+            elif not ingestion_notes:
+                st.markdown("Attach a PDF or type a CVE ID to get started.")
+
+        assistant_content = "\n\n".join(ingestion_notes) if ingestion_notes else ""
+        if answer:
+            assistant_content = (assistant_content + "\n\n" + answer).strip()
+        if assistant_content:
+            st.session_state.messages.append({"role": "assistant", "content": assistant_content})
